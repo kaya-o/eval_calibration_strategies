@@ -267,7 +267,7 @@ if __name__ == "__main__":
     }
 
     total_hits = 0
-    n_runs = (10**4)*5
+    n_runs = (10**6)
     raw_rows = []
 
     for run in range(n_runs):
