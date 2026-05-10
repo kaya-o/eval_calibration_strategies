@@ -189,7 +189,7 @@ class Conformal:
         alpha_sf = (1 / np.sqrt(t)) * ALPHA
         alpha_ex = (1 - (1 / np.sqrt(t))) * ALPHA
 
-        x_sf, y_sf = self.s_fix_hack()
+        x_sf, y_sf = self.s_fix()
         scores_sf = self.compute_scores(x_sf, y_sf)
         threshold_sf = self.quantile_threshold(scores_sf, alpha=alpha_sf)
 
@@ -214,7 +214,7 @@ class Conformal:
         elif strategy == "S-FULL":
             x_cal, y_cal = self.s_full()
         elif strategy == "S-FIX":
-            x_cal, y_cal = self.s_fix_hack()
+            x_cal, y_cal = self.s_fix()
         elif strategy == "ADA":
             x_off, y_off = self.ada_off()
             x_on, y_on = self.ada_on(x_t)
@@ -226,7 +226,7 @@ class Conformal:
             x_cal, y_cal = self.k_express(x_t, k)
         elif strategy == "EXPRESS-M":
             threshold = self.express_m(x_t, k)
-            x_sf, y_sf = self.s_fix_hack()
+            x_sf, y_sf = self.s_fix()
             x_ex, y_ex = self.express(x_t)
             n_calibration = len(x_sf) + len(x_ex)
             score_t = abs(mu(x_t) - y_t)
@@ -267,7 +267,7 @@ if __name__ == "__main__":
     }
 
     total_hits = 0
-    n_runs = (10**4)*3
+    n_runs = (10**4)*5
     raw_rows = []
 
     for run in range(n_runs):
