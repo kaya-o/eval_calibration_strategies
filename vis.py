@@ -65,6 +65,12 @@ def plot_simulation_4_1_style(
     alpha=0.4,
     strategy_order=None,
     show=True,
+    n_off=10,
+    n_on=20,
+    tau_0=20,
+    tau_1=16,
+    beta=1,
+    n_runs=None,
 ):
     """
     Read an experiment results dump and produce a Figure-2-style summary plot.
@@ -146,10 +152,33 @@ def plot_simulation_4_1_style(
     ax.set_ylabel("")
     ax.set_title("")
 
+    if n_runs is None:
+        result_dir_name = results_dir.name
+        run_part = result_dir_name.split("_runs")[0].split("_")[-1]
+        n_runs_text = run_part if run_part.isdigit() else "?"
+    else:
+        n_runs_text = str(n_runs)
+
+    parameter_text = (
+        rf"$N_{{off}}={n_off}$, $N_{{on}}={n_on}$, "
+        rf"$\tau_0={tau_0}$, $\tau_1={tau_1}$, "
+        rf"$\alpha={alpha}$, $\beta={beta}$, "
+        rf"runs={n_runs_text}"
+    )
+    ax.text(
+        0.5,
+        -0.22,
+        parameter_text,
+        transform=ax.transAxes,
+        ha="center",
+        va="top",
+        fontsize=8,
+    )
+
     for spine in ax.spines.values():
         spine.set_linewidth(0.8)
 
-    fig.tight_layout()
+    fig.subplots_adjust(bottom=0.20)
 
     if not output_filename.lower().endswith((".png", ".pdf", ".svg")):
         output_filename = f"{output_filename}.png"
@@ -186,6 +215,12 @@ if __name__ == "__main__":
     parser.add_argument("--output", default="simulation_4_1_style.png")
     parser.add_argument("--alpha", type=float, default=0.4)
     parser.add_argument("--no-show", action="store_true")
+    parser.add_argument("--n-off", type=int, default=10)
+    parser.add_argument("--n-on", type=int, default=20)
+    parser.add_argument("--tau-0", type=float, default=20)
+    parser.add_argument("--tau-1", type=float, default=16)
+    parser.add_argument("--beta", type=float, default=1)
+    parser.add_argument("--n-runs", type=int, default=None)
     args = parser.parse_args()
 
     if args.results_dir is None:
@@ -193,6 +228,12 @@ if __name__ == "__main__":
             output_filename=args.output,
             alpha=args.alpha,
             show=not args.no_show,
+            n_off=args.n_off,
+            n_on=args.n_on,
+            tau_0=args.tau_0,
+            tau_1=args.tau_1,
+            beta=args.beta,
+            n_runs=args.n_runs,
         )
     else:
         output_path = plot_simulation_4_1_style(
@@ -200,6 +241,12 @@ if __name__ == "__main__":
             output_filename=args.output,
             alpha=args.alpha,
             show=not args.no_show,
+            n_off=args.n_off,
+            n_on=args.n_on,
+            tau_0=args.tau_0,
+            tau_1=args.tau_1,
+            beta=args.beta,
+            n_runs=args.n_runs,
         )
 
     print(f"Wrote plot to {output_path}")
