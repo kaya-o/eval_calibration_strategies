@@ -9,6 +9,7 @@ TAU_0 = 20
 TAU_1 = 16
 BETA = 1
 ALPHA = 0.4
+USE_RANDOMIZED_CALIBRATION = True
 
 
 def mu(x, beta=BETA):
@@ -104,6 +105,7 @@ class Conformal:
         self.y_past = np.array([])
         self.scores_past = np.array([])
         self.s_past = np.array([])
+        self.rng = np.random.default_rng()
 
     def select_past(self, x, j, tau_0=TAU_0):
         return int(x < 1 + ((1/tau_0)*sum(self.s_past[:j])))
@@ -125,6 +127,38 @@ class Conformal:
             return np.inf
 
         return sorted_scores[quantile_idx]
+
+    def randomized_quantile_threshold(self, calibration_scores, alpha=ALPHA):
+        xi = self.rng.uniform(0.0, 1.0)
+        n = len(calibration_scores)
+
+        if n == 0:
+            return np.inf if xi > alpha else -np.inf
+
+        sorted_scores = np.sort(calibration_scores)
+
+        required_strictly_greater = int(np.floor(alpha * (n + 1) - xi)) + 1
+
+        if required_strictly_greater <= 0:
+            return np.inf
+
+        if required_strictly_greater > n:
+            return -np.inf
+
+        quantile_idx = n - required_strictly_greater
+        return sorted_scores[quantile_idx]
+
+    def calibration_threshold(self, calibration_scores, alpha=ALPHA):
+        if USE_RANDOMIZED_CALIBRATION:
+            return self.randomized_quantile_threshold(calibration_scores, alpha=alpha)
+        return self.quantile_threshold(calibration_scores, alpha=alpha)
+
+    def interval_length_from_threshold(self, threshold):
+        if np.isposinf(threshold):
+            return np.inf
+        if np.isneginf(threshold):
+            return 0.0
+        return 2 * threshold
 
     # Calibration strategies
     def full(self):
@@ -191,11 +225,11 @@ class Conformal:
 
         x_sf, y_sf = self.s_fix()
         scores_sf = self.compute_scores(x_sf, y_sf)
-        threshold_sf = self.quantile_threshold(scores_sf, alpha=alpha_sf)
+        threshold_sf = self.calibration_threshold(scores_sf, alpha=alpha_sf)
 
         x_ex, y_ex = self.express(x_t)
         scores_ex = self.compute_scores(x_ex, y_ex)
-        threshold_ex = self.quantile_threshold(scores_ex, alpha=alpha_ex)
+        threshold_ex = self.calibration_threshold(scores_ex, alpha=alpha_ex)
 
         return min(threshold_sf, threshold_ex)
 
@@ -235,21 +269,21 @@ class Conformal:
             return {
                 "miscovered": not covered,
                 "n_calibration": n_calibration,
-                "interval_length": 2 * threshold,
+                "interval_length": self.interval_length_from_threshold(threshold),
                 "threshold": threshold,
             }
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
 
         calibration_scores = self.compute_scores(x_cal, y_cal)
-        threshold = self.quantile_threshold(calibration_scores)
+        threshold = self.calibration_threshold(calibration_scores)
         score_t = abs(mu(x_t) - y_t)
         covered = score_t <= threshold
 
         return {
             "miscovered": not covered,
             "n_calibration": len(calibration_scores),
-            "interval_length": 2 * threshold,
+            "interval_length": self.interval_length_from_threshold(threshold),
             "threshold": threshold,
         }
 
