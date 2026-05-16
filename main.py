@@ -4,9 +4,13 @@ from pathlib import Path
 import numpy as np
 
 N_OFF = 10
+# Number of online observations available before the reported target point.
 N_ON = 20
+ONLINE_STREAM_LENGTH = N_ON + 1
 TAU_0 = 20
 TAU_1 = 16
+T_JUMP = N_ON - 1
+EVAL_T = N_ON
 BETA = 1
 ALPHA = 0.4
 USE_RANDOMIZED_CALIBRATION = True
@@ -21,9 +25,8 @@ def generate_datapoints(n):
     # X ~ Uniform[0, 2]
     X = rng.uniform(0.0, 2.0, size=n)
 
-    # epsilon|X ~ N(0, X/2)
-    # np.random.normal uses standard deviation, not variance
-    epsilon_std = np.sqrt(X / 2.0)
+    # Match the source notebook's np.random.normal(0, X/2): scale is std.
+    epsilon_std = X / 2.0
     epsilon = rng.normal(loc=0.0, scale=epsilon_std)
     
     Y = X + epsilon
@@ -105,14 +108,36 @@ class Conformal:
         self.y_past = np.array([])
         self.scores_past = np.array([])
         self.s_past = np.array([])
+        self.bounds_past = np.array([])
         self.rng = np.random.default_rng()
 
-    def select_past(self, x, j, tau_0=TAU_0):
-        return int(x < 1 + ((1/tau_0)*sum(self.s_past[:j])))
+    def selection_bound(self, t, tau_0=TAU_0, tau_1=TAU_1, t_jump=T_JUMP):
+        selected_before = np.sum(self.s_past)
+        if t >= t_jump:
+            return np.inf if selected_before > tau_1 else -np.inf
+        return 1 + ((1 / tau_0) * selected_before)
+
+    def select_at_bound(self, x, bound):
+        return np.asarray(x) < bound
+
+    def select_past(self, x, j):
+        return int(self.select_at_bound(x, self.bounds_past[j]))
 
     def select_t(self, x=None, j=None, tau_1=TAU_1):
-        s_past = [self.select_past(x_i, i) for i, x_i in enumerate(self.x_past)]
-        return int(np.sum(s_past) > tau_1)
+        if x is None:
+            raise ValueError("x is required")
+        t = len(self.x_past) if j is None else j
+        return int(self.select_at_bound(x, self.selection_bound(t, tau_1=tau_1)))
+
+    def same_selection_signature(self, x_candidates, x_t, bounds):
+        x_candidates = np.asarray(x_candidates)
+        bounds = np.asarray(bounds)
+        if bounds.size == 0:
+            return np.ones(x_candidates.shape[0], dtype=bool)
+
+        candidate_signature = x_candidates.reshape(-1, 1) < bounds.reshape(1, -1)
+        test_signature = np.asarray([x_t]).reshape(-1, 1) < bounds.reshape(1, -1)
+        return np.all(candidate_signature == test_signature, axis=1)
 
     def quantile_threshold(self, calibration_scores, alpha=ALPHA):
         if len(calibration_scores) == 0:
@@ -164,16 +189,16 @@ class Conformal:
     def full(self):
         return np.concatenate([self.x_off, self.x_past]), np.concatenate([self.y_off, self.y_past])
 
-    def s_full(self):
+    def s_full(self, current_bound):
         x_candidates = np.concatenate([self.x_off, self.x_past])
         y_candidates = np.concatenate([self.y_off, self.y_past])
-        selected_mask = np.array([self.select_t(x) == 1 for x in x_candidates])
+        selected_mask = self.select_at_bound(x_candidates, current_bound)
         x_selected = x_candidates[selected_mask]
         y_selected = y_candidates[selected_mask]
         return x_selected, y_selected
 
-    def s_fix(self):
-        selected_mask = np.array([self.select_t(x) == 1 for x in self.x_off])
+    def s_fix(self, current_bound):
+        selected_mask = self.select_at_bound(self.x_off, current_bound)
         x_selected = self.x_off[selected_mask]
         y_selected = self.y_off[selected_mask]
         return x_selected, y_selected
@@ -186,48 +211,47 @@ class Conformal:
         return x_selected, y_selected
 
     # bao et al. 2024
-    def ada_off(self):
-        selected_mask = np.array([self.select_t(x_j) == 1 for x_j in self.x_off])
+    def ada_off(self, current_bound):
+        selected_mask = self.select_at_bound(self.x_off, current_bound)
         return self.x_off[selected_mask], self.y_off[selected_mask]
 
-    def ada_on(self, x_t):
-        selected_mask = np.array([self.select_t(x_j) == 1 and self.select_past(x_j, j) == self.select_past(x_t, j) for j,x_j in enumerate(self.x_past)])
+    def ada_on(self, x_t, current_bound):
+        current_mask = self.select_at_bound(self.x_past, current_bound)
+        history_match = np.array([
+            int(self.s_past[j]) == self.select_past(x_t, j)
+            for j in range(len(self.x_past))
+        ], dtype=bool)
+        selected_mask = current_mask & history_match
         return self.x_past[selected_mask], self.y_past[selected_mask]
 
-    def express(self, x_t):
+    def express(self, x_t, current_bound):
         x_candidates = np.concatenate([self.x_off, self.x_past])
         y_candidates = np.concatenate([self.y_off, self.y_past])
-        selected_mask = np.array([
-            bool(self.select_t(x_j) 
-             * np.prod([int(self.select_past(x_j, i) == self.select_past(x_t, i)) for i, x_i in enumerate(self.x_past)])) 
-                for x_j in x_candidates
-        ])
+        bounds = np.append(self.bounds_past, current_bound)
+        selected_mask = self.same_selection_signature(x_candidates, x_t, bounds)
         return x_candidates[selected_mask], y_candidates[selected_mask]
     
-    def k_express(self, x_t, k):
+    def k_express(self, x_t, k, current_bound):
+        recent_start = max(0, len(self.x_past) - k)
         x_candidates = np.concatenate([self.x_off, self.x_past[-k:]])
         y_candidates = np.concatenate([self.y_off, self.y_past[-k:]])
-        rule_idx = range(len(self.x_past)-k, len(self.x_past))
-        selected_mask = np.array([
-            bool(self.select_t(x_j) 
-             * np.prod([int(self.select_past(x_j, i) == self.select_past(x_t, i)) for i in rule_idx])) 
-                for x_j in x_candidates
-        ])
+        bounds = np.append(self.bounds_past[recent_start:], current_bound)
+        selected_mask = self.same_selection_signature(x_candidates, x_t, bounds)
         return x_candidates[selected_mask], y_candidates[selected_mask]
     
-    def express_m(self, x_t, k):
-        t = len(self.x_past)
+    def express_m(self, x_t, k, current_bound):
+        t = len(self.x_past) + 1
         if t == 0:
             return np.inf
 
         alpha_sf = (1 / np.sqrt(t)) * ALPHA
         alpha_ex = (1 - (1 / np.sqrt(t))) * ALPHA
 
-        x_sf, y_sf = self.s_fix()
+        x_sf, y_sf = self.s_fix(current_bound)
         scores_sf = self.compute_scores(x_sf, y_sf)
         threshold_sf = self.calibration_threshold(scores_sf, alpha=alpha_sf)
 
-        x_ex, y_ex = self.express(x_t)
+        x_ex, y_ex = self.express(x_t, current_bound)
         scores_ex = self.compute_scores(x_ex, y_ex)
         threshold_ex = self.calibration_threshold(scores_ex, alpha=alpha_ex)
 
@@ -236,32 +260,33 @@ class Conformal:
     def compute_scores(self, x, y):
         return np.abs(mu(x) - y)
 
-    def append_online_point(self, x_t, y_t, score_t, s_t):
+    def append_online_point(self, x_t, y_t, score_t, s_t, bound_t):
         self.x_past = np.append(self.x_past, x_t)
         self.y_past = np.append(self.y_past, y_t)
         self.scores_past = np.append(self.scores_past, score_t)
         self.s_past = np.append(self.s_past, s_t)
+        self.bounds_past = np.append(self.bounds_past, bound_t)
 
-    def evaluate_strategy(self, strategy, x_t, y_t, k=5):
+    def evaluate_strategy(self, strategy, x_t, y_t, current_bound, k=5):
         if strategy == "FULL":
             x_cal, y_cal = self.full()
         elif strategy == "S-FULL":
-            x_cal, y_cal = self.s_full()
+            x_cal, y_cal = self.s_full(current_bound)
         elif strategy == "S-FIX":
-            x_cal, y_cal = self.s_fix()
+            x_cal, y_cal = self.s_fix(current_bound)
         elif strategy == "ADA":
-            x_off, y_off = self.ada_off()
-            x_on, y_on = self.ada_on(x_t)
+            x_off, y_off = self.ada_off(current_bound)
+            x_on, y_on = self.ada_on(x_t, current_bound)
             x_cal = np.concatenate([x_off, x_on])
             y_cal = np.concatenate([y_off, y_on])
         elif strategy == "EXPRESS":
-            x_cal, y_cal = self.express(x_t)
+            x_cal, y_cal = self.express(x_t, current_bound)
         elif strategy == "K-EXPRESS":
-            x_cal, y_cal = self.k_express(x_t, k)
+            x_cal, y_cal = self.k_express(x_t, k, current_bound)
         elif strategy == "EXPRESS-M":
-            threshold = self.express_m(x_t, k)
-            x_sf, y_sf = self.s_fix()
-            x_ex, y_ex = self.express(x_t)
+            threshold = self.express_m(x_t, k, current_bound)
+            x_sf, y_sf = self.s_fix(current_bound)
+            x_ex, y_ex = self.express(x_t, current_bound)
             n_calibration = len(x_sf) + len(x_ex)
             score_t = abs(mu(x_t) - y_t)
             covered = score_t <= threshold
@@ -308,7 +333,7 @@ if __name__ == "__main__":
         if (run % 1000 == 0):
             print(f"Run: {run}")
         conformal = Conformal()
-        x_all, y_all, scores_all = generate_datapoints(N_ON + N_OFF)
+        x_all, y_all, scores_all = generate_datapoints(ONLINE_STREAM_LENGTH + N_OFF)
         conformal.x_off = x_all[:N_OFF]
         conformal.y_off = y_all[:N_OFF]
         conformal.scores_off = scores_all[:N_OFF]
@@ -317,19 +342,25 @@ if __name__ == "__main__":
         y_on = y_all[N_OFF:]
         scores_on = scores_all[N_OFF:]
 
-        for t in range(N_ON):
+        for t in range(ONLINE_STREAM_LENGTH):
             x_t = x_on[t]
             y_t = y_on[t]
             score_t = scores_on[t]
 
-            # Current selected/reported point under the second branch.
-            s_t = conformal.select_t(x_t, t)
+            current_bound = conformal.selection_bound(t)
+            s_t = int(conformal.select_at_bound(x_t, current_bound))
 
-            if s_t:
+            if s_t and t == EVAL_T:
                 total_hits += 1
 
                 for strategy in strategies:
-                    strategy_result = conformal.evaluate_strategy(strategy, x_t, y_t, k=5)
+                    strategy_result = conformal.evaluate_strategy(
+                        strategy,
+                        x_t,
+                        y_t,
+                        current_bound=current_bound,
+                        k=5,
+                    )
 
                     results[strategy]["selected"] += 1
                     results[strategy]["miscovered"] += int(strategy_result["miscovered"])
@@ -348,9 +379,7 @@ if __name__ == "__main__":
                         "sum_s_past": np.sum(conformal.s_past),
                     })
 
-            # Historical value used by the first branch for future times.
-            s_history_t = conformal.select_past(x_t, t)
-            conformal.append_online_point(x_t, y_t, score_t, s_history_t)
+            conformal.append_online_point(x_t, y_t, score_t, s_t, current_bound)
 
     print(f"total_hits={total_hits}")
 
